@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <TinyGPS++.h>
@@ -74,9 +75,20 @@ void postLocation(double lat, double lng, int battery) {
     }
 
     HTTPClient http;
-    http.begin(SERVER_URL);
+    // Render serves HTTPS only, so use a TLS client for https:// URLs.
+    // setInsecure() skips certificate validation — fine for this demo; avoids
+    // bundling/rotating a CA cert. Use a plain client for local http:// testing.
+    const bool isHttps = String(SERVER_URL).startsWith("https");
+    WiFiClient       plainClient;
+    WiFiClientSecure secureClient;
+    if (isHttps) {
+        secureClient.setInsecure();
+        http.begin(secureClient, SERVER_URL);
+    } else {
+        http.begin(plainClient, SERVER_URL);
+    }
     http.addHeader("Content-Type", "application/json");
-    http.setTimeout(8000);
+    http.setTimeout(15000);   // Render free tier can take a while to wake from sleep
 
     JsonDocument doc;
     doc["node_id"]   = DEVICE_ID;

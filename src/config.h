@@ -7,7 +7,7 @@
 // ── Backend ───────────────────────────────────────────────────────────────────
 // Use your server machine's LAN IP (run `ipconfig` on the server to find it).
 // The tracker and server must be on the same network.
-#define SERVER_URL      "http://172.20.10.3:3000/api/tracker"
+#define SERVER_URL      "https://backend-wvbf.onrender.com/api/tracker"
 
 // ── Device ID ─────────────────────────────────────────────────────────────────
 // Unique string per tracker — stored as `imei` in the database.
