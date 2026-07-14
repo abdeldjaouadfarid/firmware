@@ -22,12 +22,24 @@
 #define BAT_V_MIN      3.0f   // voltage at 0 %
 #define BAT_V_MAX      4.2f   // voltage at 100 %
 
+// ── Tamper / anti-removal copper loop ────────────────────────────────────────
+// One copper wire leaves the board, runs through the collar, and comes back —
+// one end on TAMPER_PIN, the other on any GND pad (NOT 3V3!).
+//   wire intact → pin pulled LOW through the wire  → OK
+//   wire cut    → internal pull-up drives pin HIGH → TAMPER
+#define TAMPER_PIN          7        // GPIO 7 (change if you used another pad)
+#define TAMPER_DEBOUNCE_MS  2000UL   // must stay "cut" this long → real alert
+#define TAMPER_LATCH        true     // once tripped, stay tripped until power-cycle
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 HardwareSerial gpsSerial(1);
 TinyGPSPlus    gps;
 
 unsigned long lastPost = 0;
+
+bool          tamperTripped  = false;  // current verdict (possibly latched)
+unsigned long tamperCutSince = 0;      // millis() when the cut first appeared (0 = intact)
 
 // ── Battery ───────────────────────────────────────────────────────────────────
 // Returns battery voltage in volts. 0 likely means no LiPo attached (USB-only).
@@ -49,6 +61,23 @@ int voltageToPercent(float voltage) {
     return constrain(pct, 0, 100);
 }
 
+// ── Tamper loop ──────────────────────────────────────────────────────────────
+// Poll every loop() so the debounce timer stays accurate. Returns true once the
+// copper loop has been open (cut) continuously for TAMPER_DEBOUNCE_MS.
+bool checkTamper() {
+    bool cutNow = (digitalRead(TAMPER_PIN) == HIGH);   // HIGH = broken/cut wire
+
+    if (cutNow) {
+        if (tamperCutSince == 0) tamperCutSince = millis();      // start the clock
+        if (millis() - tamperCutSince >= TAMPER_DEBOUNCE_MS)
+            tamperTripped = true;                                // stable cut → trip
+    } else {
+        tamperCutSince = 0;                                      // intact / bounce
+        if (!TAMPER_LATCH) tamperTripped = false;
+    }
+    return tamperTripped;
+}
+
 // ── WiFi ──────────────────────────────────────────────────────────────────────
 void connectWiFi() {
     Serial.printf("Connecting to %s", WIFI_SSID);
@@ -68,7 +97,7 @@ void connectWiFi() {
 }
 
 // ── HTTP POST ─────────────────────────────────────────────────────────────────
-void postLocation(double lat, double lng, int battery) {
+void postLocation(double lat, double lng, int battery, bool tamper) {
     if (WiFi.status() != WL_CONNECTED) {
         connectWiFi();
         if (WiFi.status() != WL_CONNECTED) return;
@@ -92,9 +121,10 @@ void postLocation(double lat, double lng, int battery) {
 
     JsonDocument doc;
     doc["node_id"]   = DEVICE_ID;
-    doc["latitude"]  = serialized(String(lat, 6));
-    doc["longitude"] = serialized(String(lng, 6));
+    doc["latitude"]  = serialized(String(lat, 8));
+    doc["longitude"] = serialized(String(lng, 8));
     doc["battery"]   = battery;
+    doc["tamper"]    = tamper;
 
     String body;
     serializeJson(doc, body);
@@ -122,6 +152,9 @@ void setup() {
     digitalWrite(VEXT_PIN, HIGH);
     delay(200);
 
+    // Tamper loop: pull-up so a broken/cut wire reads HIGH.
+    pinMode(TAMPER_PIN, INPUT_PULLUP);
+
     gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     Serial.println("GPS serial started — waiting for fix...");
 
@@ -139,8 +172,15 @@ void loop() {
         gps.encode(c);
     }
 
+    // Poll the tamper loop every pass so the debounce timer stays accurate.
+    bool tamper = checkTamper();
+    static bool prevTamper = false;
+    bool tamperJustTripped = tamper && !prevTamper;
+    prevTamper = tamper;
+
     unsigned long now = millis();
-    if (now - lastPost < POST_INTERVAL_MS) return;
+    // Normal cadence — but a brand-new tamper trip jumps the queue and posts now.
+    if (now - lastPost < POST_INTERVAL_MS && !tamperJustTripped) return;
     lastPost = now;
 
     // Post as soon as we have ANY valid position. TinyGPS keeps the last known
@@ -151,10 +191,11 @@ void loop() {
         //  chars=0          → GPS not sending data (power/pin/baud) — check wiring
         //  chars>0, csum>0  → data arriving but corrupt → wrong baud rate
         //  chars>0, csum=0  → all good, just needs sky view / time to lock
-        Serial.printf("[GPS] No fix yet  sats=%d  chars=%lu  good=%lu  csumErr=%lu  | WiFi=%s\n",
+        Serial.printf("[GPS] No fix yet  sats=%d  chars=%lu  csumErr=%lu  | WiFi=%s  | TAMPER=%s\n",
                       gps.satellites.value(), gps.charsProcessed(),
-                      gps.passedChecksum(), gps.failedChecksum(),
-                      WiFi.status() == WL_CONNECTED ? "ok" : "down");
+                      gps.failedChecksum(),
+                      WiFi.status() == WL_CONNECTED ? "ok" : "down",
+                      tamper ? "YES" : "no");
         return;
     }
 
@@ -164,8 +205,9 @@ void loop() {
     float  volts = readBatteryVoltage();
     int    bat   = voltageToPercent(volts);
 
-    Serial.printf("[GPS] lat=%.6f  lng=%.6f  sats=%d  hdop=%.1f  fixAge=%lums  | bat=%d%% (%.2fV)\n",
-                  lat, lng, gps.satellites.value(), gps.hdop.hdop(), fixAge, bat, volts);
+    Serial.printf("[GPS] lat=%.6f  lng=%.6f  sats=%d  fixAge=%lums  | bat=%d%% (%.2fV)  | TAMPER=%s\n",
+                  lat, lng, gps.satellites.value(), fixAge, bat, volts,
+                  tamper ? "YES" : "no");
 
-    postLocation(lat, lng, bat);
+    postLocation(lat, lng, bat, tamper);
 }
