@@ -117,6 +117,7 @@ void postLocation(double lat, double lng, int battery, bool tamper) {
         http.begin(plainClient, SERVER_URL);
     }
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Tracker-Key", DEVICE_KEY);   // authenticate this device to the server
     http.setTimeout(15000);   // Render free tier can take a while to wake from sleep
 
     JsonDocument doc;
